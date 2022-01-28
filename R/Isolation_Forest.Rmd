@@ -1,0 +1,259 @@
+---
+title: "Unsupervised_Anomaly_Detection_Using_Isolation_Forest"
+output: html_document
+---
+
+## O projekcie
+
+Celem projektu jest zbadanie możliwości detekcji anomalii w zbiorze danych przy pomocy algorytmu Drzewa Izolacji oraz porównanie wyników z algorytmami uczenia nadzorowanego.
+
+
+
+```{r warning=FALSE}
+library(tools)
+library(ggplot2)
+library(solitude)
+library(R.matlab)
+library(class)
+library(caret)
+library(e1071)
+library(randomForest)
+library(CORElearn)
+library(Rlof)
+library(dbscan)
+library(grid)
+library(gridExtra)
+library(ROCR)
+```
+
+### Ładowanie i przetwarzanie danych
+
+```{r echo=FALSE, results='hide', fig.keep='all', eval=FALSE}
+read_data <- function(path) {
+  if (file_ext(path) == "csv") { 
+    df <- read.table(path, sep = ",", header = )
+    return(df)
+    } else if (file_ext(path) == "mat") {
+    df <- readMat(path)
+    return(df)
+    } else {
+      stop("Unsupported extension. Provide `csv` or `mat` file.")
+    }
+}
+```
+
+
+```{r}
+arrhythmia_dataset <- read_data("Dataset/arrhythmia.mat")
+head(arrhythmia_dataset)
+```
+```{r}
+prepare_train_data <- function(dataset, frac=1.0) {
+  set.seed(123)
+  sample_size <- floor(frac * nrow(dataset))
+  split_idx <- sample(seq_len(nrow(dataset)), size = sample_size)
+  train <- df[split_idx, ]
+  train_no_label <- train[,2:ncol(train)]
+  train_label <- train[,1]
+  return(list(train=train, train_no_label=train_no_label, train_label=train_label))
+}
+
+run_evaluation_metrics <- function(pred, expected, print_result=TRUE) {
+  precision <- posPredValue(pred, expected, positive='1')
+  recall <- sensitivity(pred, expected, positive='1')
+  conf <- confusionMatrix(pred, expected, positive='1')
+  if(print_result) {
+    print(paste("precision: ", precision))
+    print(paste("recall: ", recall))
+    print(conf)
+  }
+  return(list(precision=round(precision, 4), recall=round(recall, 4), accuracy=round(conf$overall[1], 4), conf_matrix=conf))
+}
+```
+
+
+### Algorytm
+
+**isolation_forest**
+
+Parametry:
+
+* *sub_set_size* - liczba podzbiorza danych używanych dla tworzenia pojedycznego drzewa
+* *num_of_trees* - liczba drzew
+
+```{r include=FALSE, message=FALSE}
+isolation_forest <- function(dataset, sub_set_size = 256, num_of_trees = 100, anomaly_score = 0.5) {
+  forest<- isolationForest$new(sample_size = sub_set_size, num_trees = num_of_trees)
+  forest$fit(dataset$train_no_label)
+  pred <- forest$predict(dataset$train_no_label)
+  return(ifelse(pred$anomaly_score > anomaly_score, 1, 0))
+}
+```
+
+```{r}
+isolation_forest <- function(dataset, sub_set_size = 256, num_of_trees = 100) {
+  forest <- IsolationForest$new()
+  fit <- forest$fit(dataset$train_no_label, num_of_tree, sub_set_size)
+  pred <- forest$predict(dataset$train_no_label, sub_set_size, 0.5)
+  
+  return(pred)
+}
+```
+
+```{r message=FALSE, warning=FALSE, echo=FALSE, results='hide',fig.keep='all', eval=FALSE}
+name_of_cols = c("test_data_name", "execution_time", "sub_set_size", "num_of_trees", "TPR", "TNR", "PPV", "NPV")
+run_if_with_param <- function(dataset_name, dataset, sub_set_size, num_of_tree) {
+  prepare_data_to_test <- prepare_train_data(dataset)
+  start.time <- Sys.time()
+  pred <- factor(run_isolation_forest(prepare_data_to_test$train_no_label, sub_set_size, num_of_tree, 0.6))
+  expected <-  factor(prepare_data_to_test$train_label)
+  end.time <- Sys.time()
+  
+  time.taken <- round(end.time - start.time, 4)
+  result_list <- run_evaluation_metrics(factor(pred), expected, FALSE)
+  
+  TPR <- round(result_list$conf$byClass[[1]], 2)
+  TNR <- round(result_list$conf$byClass[[2]], 2)
+  PPV <- round(result_list$conf$byClass[[3]], 2)
+  NPV <- round(result_list$conf$byClass[[4]], 2)
+  
+  # bo nie możemy mieć danych w podzbiorze więcej niz jest w zbiorze
+  if(sub_set_size > length(pred)) {
+    sub_set_size = length(pred)
+  }
+  
+  return(c(test_data_name, time.taken, sub_set_size, num_of_tree, TPR, TNR, PPV, NPV))
+}
+```
+
+
+```{r}
+metric_for_num_of_tree <- function(dataset_name, dataset, set_of_tree_nums, x_title, y_title) {
+  df_tree_nums_metrics <- data.frame(matrix(ncol = 8, nrow = 0))
+  name_of_cols = c("test_data_name", "execution_time", "sub_set_size", "num_of_trees", "TPR", "TNR", "PPV", "NPV")
+  df_tree_nums_metrics <- setNames(df_tree_nums_metrics, name_of_cols)
+  sub_set_size <- 256
+  
+  for(tree_num in set_of_tree_nums) {
+    df_tree_nums_metrics[nrow(df_tree_nums_metrics) + 1,] = run_if_with_param(dataset_name, dataset, sub_set_size, tree_num)
+  }
+  
+  tree_num_in_subset <- factor(df_tree_nums_metrics$num_of_trees, level = set_of_tree_nums)
+  
+  plot <- ggplot(df_tree_nums_metrics, aes(tree_num_in_subset)) +
+          geom_line(aes(y = TPR, color = "TPR/recall", group=2)) +
+          geom_line(aes(y = TNR, color = "TNR", group=2)) +
+          geom_line(aes(y = PPV, color = "PPV/precision", group=2)) +
+          geom_line(aes(y = NPV, color = "NPV", group=2)) +
+          labs(
+              y = y_title,
+              x = x_title
+            ) +
+          theme(legend.position="top")
+  return(list(metrics=df_tree_nums_metrics, plot=plot))
+  
+prepare_sub_set_size_list <- function(size_of_data) {
+  result = c()
+  for(i in c(1:10)) {
+    result <- c(result, as.integer(i/10 * size_of_data))
+  }
+  return(result)
+}
+
+metric_for_sub_set_size <- function(dataset_name, dataset, sub_sets_size_list, x_title, y_title) {
+  tree_num <- 20
+  
+  df_sub_set_metrics <- data.frame(matrix(ncol = 8, nrow = 0))
+  df_sub_set_metrics <- setNames(df_sub_set_metrics, name_of_cols)
+  
+  for(sub_set in sub_sets_size_list) {
+    df_sub_set_metrics[nrow(df_sub_set_metrics) + 1,] = run_if_with_param(dataset_name, dataset, sub_set, tree_num)
+  }
+  
+  tree_num_in_subset <- factor(df_sub_set_metrics$sub_set_size, level = sub_sets_size_list)
+  
+  plot <- ggplot(df_sub_set_metrics, aes(tree_num_in_subset)) +
+          geom_line(aes(y = TPR, color = "TPR/recall", group=2)) +
+          geom_line(aes(y = TNR, color = "TNR", group=2)) +
+          geom_line(aes(y = PPV, color = "PPV/precision", group=2)) +
+          geom_line(aes(y = NPV, color = "NPV", group=2)) +
+          labs(
+              x = x_title,
+              y = y_title
+            ) +
+          theme(legend.position="top")
+  return(list(metrics=df_sub_set_metrics, plot=plot))
+}
+
+run_all_combination <- function(dataset, sub_sets_size_list, set_of_tree_nums) {
+  df_sub_set_and_tree_num_metrics <- data.frame(matrix(ncol = 8, nrow = 0))
+  df_sub_set_and_tree_num_metrics <- setNames(df_sub_set_and_tree_num_metrics, name_of_cols)
+  
+  for(sub_set_size in sub_sets_size_list) {
+    print(sub_set_size)
+    for(tree_num in set_of_tree_nums) {
+      print(tree_num)
+      df_sub_set_and_tree_num_metrics[nrow(df_sub_set_and_tree_num_metrics) + 1,] = run_if_with_param("test_data_name", data_df, sub_set_size, tree_num)
+    }
+  }
+  
+  return(df_sub_set_and_tree_num_metrics)
+}
+}
+```
+
+
+
+#### Detekcja anomilii w zbiorze danych *arrhytmia*
+
+```{r message=FALSE, results='hide'}
+dataset_name <- "arrhytmia"
+dataset <- arrhythmia_dataset
+set_of_tree_nums <- list(10, 20, 40, 80, 140, 180, 250, 300)
+result_metrics_num_of_tree <- metric_for_num_of_tree(dataset_name,
+                                                     dataset,
+                                                     set_of_tree_nums,
+                                                     x_title="Liczba drzew",
+                                                     y_title="Procent [%]")
+
+sub_sets_size_list <- prepare_sub_set_size_list(nrow(dataset_test))
+
+result_metrics_sub_set_size <- metric_for_sub_set_size(dataset_name,
+                                                       dataset,
+                                                       sub_sets_size_list,
+                                                       x_title="Rozmiar zbioru danych wykorzystywany do tworzenia jednego drzewa",
+                                                       y_title="Procent [%]")
+
+df_sub_set_and_tree_num_metrics <- run_all_combination(dataset_test, set_of_tree_nums, sub_sets_size_list)
+```
+
+
+Wykres po lewej stronie przedstawia wpływ wartości oznaczająca liczba tworzynych drzew w lasie izolaczynjnym na wyniki działania algorytmu. Jako wyniki podane dane z **confision matrix**.
+
+Wykres po prawej przedstawia wpływ wartości oznaczająca liczba zbiora danych z którego tworzone poszczególne drzewa w lasie izolaczynjnym na wyniki działania algorytmu. Jako wyniki podane dane z *confision matrix*.
+
+
+```{r message=FALSE}
+grid.arrange(result_metrics_num_of_tree$plot, result_metrics_sub_set_size$plot, ncol = 2, widths=c(2,2))
+```
+
+
+Poszukiwanie najlepszej konfiguracji parametrów według **precision**:
+
+```{r}
+df_sub_set_and_tree_num_metrics$PPV[df_sub_set_and_tree_num_metrics$PPV == 'NaN'] <- 0
+df_sub_set_and_tree_num_metrics_ppv <- df_sub_set_and_tree_num_metrics[order(df_sub_set_and_tree_num_metrics$PPV, decreasing = TRUE),]
+df_show <- df_sub_set_and_tree_num_metrics_ppv[1:5, ]
+df_show<- subset(df_show, select=c("sub_set_size", "num_of_trees", "PPV"))
+knitr::kable(df_show, align = "lccrr")
+```
+
+Poszukiwanie najlepszej konfiguracji parametrów według **recall**:
+
+```{r}
+df_sub_set_and_tree_num_metrics_tpr <- df_sub_set_and_tree_num_metrics[order(df_sub_set_and_tree_num_metrics$TPR, decreasing = TRUE),]
+df_show <- df_sub_set_and_tree_num_metrics_tpr[1:5, ]
+df_show <- subset(df_show, select=c("sub_set_size", "num_of_trees", "TPR"))
+knitr::kable(df_show, align = "lccrr")
+```
+
